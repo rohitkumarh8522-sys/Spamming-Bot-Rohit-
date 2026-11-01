@@ -34,15 +34,13 @@ accounts_data = load_json(ACCOUNTS_FILE, {})
 
 broadcast_task = None
 
-# Environment Variables se credentials fetch karna (Render ke liye zaroori hai)
 API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) # Apni Telegram ID yahan ya Render environment variable me dalein
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 bot = Client("master_control_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# FastAPI Lifespan to start and stop Telegram bot securely with web service
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -57,9 +55,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-app_fastapi = FastAPI(lifespan=lifespan)
+# Yahan app_fastapi ki jagah 'app' kar diya gaya hai taaki Uvicorn ise easily load kar sake
+app = FastAPI(lifespan=lifespan)
 
-@app_fastapi.get("/")
+@app.get("/")
 def home():
     return {"status": "Bot is running live on Render!"}
 
