@@ -1,12 +1,12 @@
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 
-# Configuration files
 ACCOUNTS_FILE = "accounts.json"
 CONFIG_FILE = "config.json"
 
@@ -32,26 +32,38 @@ def save_json(filename, data):
 config = load_json(CONFIG_FILE, DEFAULT_CONFIG)
 accounts_data = load_json(ACCOUNTS_FILE, {})
 
-active_clients = {}
 broadcast_task = None
 
-app_fastapi = FastAPI()
-
-@app_fastapi.get("/")
-def home():
-    return {"status": "Bot is running on Render!"}
-
-API_ID = int(os.environ.get("API_ID", "1234567"))
-API_HASH = os.environ.get("API_HASH", "your_api_hash")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_bot_token")
-
-# Apna Telegram Numeric User ID yahan dalein ya Environment variable me set karein
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789")) # <-- Yahan apna actual Telegram ID dalein
+# Environment Variables se credentials fetch karna (Render ke liye zaroori hai)
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) # Apni Telegram ID yahan ya Render environment variable me dalein
 
 bot = Client("master_control_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+# FastAPI Lifespan to start and stop Telegram bot securely with web service
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        await bot.start()
+        print("Telegram Bot started successfully!")
+    except Exception as e:
+        print(f"Error starting bot: {e}")
+    yield
+    try:
+        await bot.stop()
+        print("Telegram Bot stopped.")
+    except Exception:
+        pass
+
+app_fastapi = FastAPI(lifespan=lifespan)
+
+@app_fastapi.get("/")
+def home():
+    return {"status": "Bot is running live on Render!"}
+
 def get_main_keyboard():
-    status_text = "🟢 Running" if config["running"] else "🔴 Stopped"
     keyboard = [
         [InlineKeyboardButton("▶️ Start All", callback_data="start_broadcast"),
          InlineKeyboardButton("⏹️ Stop All", callback_data="stop_broadcast")],
@@ -62,18 +74,9 @@ def get_main_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Owner Authorization Filter ---
 async def check_admin(update):
-    if isinstance(update, Message):
-        user_id = update.from_user.id
-    elif isinstance(update, CallbackQuery):
-        user_id = update.from_user.id
-    else:
-        return False
-    
-    if user_id != ADMIN_ID:
-        return False
-    return True
+    user_id = update.from_user.id
+    return user_id == ADMIN_ID
 
 @bot.on_message(filters.command("start"))
 async def start_cmd(client, message: Message):
@@ -238,11 +241,5 @@ async def run_broadcaster():
         delay_time = config.get("delay", 60)
         await asyncio.sleep(delay_time)
 
-async def main():
-    await bot.start()
-    config_server = uvicorn.Config(app=app_fastapi, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), log_level="info")
-    server = uvicorn.Server(config_server)
-    await server.serve()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
