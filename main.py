@@ -1,11 +1,16 @@
 import asyncio
 import json
 import os
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+
+# Logging setup taaki Render logs me sab kuch dikhe
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 ACCOUNTS_FILE = "accounts.json"
 CONFIG_FILE = "config.json"
@@ -34,33 +39,47 @@ accounts_data = load_json(ACCOUNTS_FILE, {})
 
 broadcast_task = None
 
-API_ID = int(os.environ.get("API_ID", "0"))
+# Credentials environment variables se lena
+API_ID = os.environ.get("API_ID", "")
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+ADMIN_ID = os.environ.get("ADMIN_ID", "")
+
+try:
+    API_ID = int(API_ID) if API_ID else 0
+except ValueError:
+    API_ID = 0
+
+try:
+    ADMIN_ID = int(ADMIN_ID) if ADMIN_ID else 0
+except ValueError:
+    ADMIN_ID = 0
+
+logger.info(f"Config loaded -> API_ID: {API_ID}, ADMIN_ID: {ADMIN_ID}")
 
 bot = Client("master_control_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("Starting Telegram Bot...")
     try:
         await bot.start()
-        print("Telegram Bot started successfully!")
+        logger.info(">>> Telegram Bot Started Successfully! <<<")
     except Exception as e:
-        print(f"Error starting bot: {e}")
+        logger.error(f"CRITICAL ERROR starting bot: {e}")
     yield
+    logger.info("Stopping Telegram Bot...")
     try:
         await bot.stop()
-        print("Telegram Bot stopped.")
-    except Exception:
-        pass
+        logger.info(">>> Telegram Bot Stopped. <<<")
+    except Exception as e:
+        logger.error(f"Error stopping bot: {e}")
 
-# Yahan app_fastapi ki jagah 'app' kar diya gaya hai taaki Uvicorn ise easily load kar sake
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 def home():
-    return {"status": "Bot is running live on Render!"}
+    return {"status": "Bot is active and running!"}
 
 def get_main_keyboard():
     keyboard = [
@@ -73,30 +92,75 @@ def get_main_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-async def check_admin(update):
-    user_id = update.from_user.id
-    return user_id == ADMIN_ID
-
-@bot.on_message(filters.command("start"))
-async def start_cmd(client, message: Message):
-    if not await check_admin(message):
-        await message.reply_text("❌ Aap is bot ke owner nahi hain! Is bot ko use karne ke liye owner (@G_KlNG) se access lein.")
+# Global message handler jo har incoming message ko check karega
+@bot.on_message()
+async def global_message_handler(client, message: Message):
+    user_id = message.from_user.id if message.from_user else 0
+    logger.info(f"Incoming message from User ID: {user_id}, Text: {message.text}")
+    
+    # Agar ADMIN_ID set nahi hai, toh logs me user ID print kar dega
+    if ADMIN_ID == 0:
+        logger.warning(f"⚠️ ADMIN_ID is not set! Aapki Telegram User ID `{user_id}` hai. Ise Render Environment Variables me add karein.")
+    
+    # Owner check
+    if ADMIN_ID != 0 and user_id != ADMIN_ID:
+        await message.reply_text(f"❌ Aap is bot ke owner nahi hain! Aapki User ID `{user_id}` hai. Is bot ko use karne ke liye owner (@G_KlNG) se access lein.")
         return
 
-    accounts_count = len(accounts_data)
-    running_status = "Running" if config["running"] else "Stopped"
-    text = (
-        f"✨ **Master Control Bot** ✨\n"
-        f"👤 **User Panel**\n"
-        f"📊 Accounts: {accounts_count} ({running_status})\n"
-        f"⏱️ Delay Cycle: {config['delay']}s\n"
-        f"💬 Message: {config['message'][:30]}..."
-    )
-    await message.reply_text(text, reply_markup=get_main_keyboard())
+    text = message.text or ""
+
+    if text.startswith("/start"):
+        accounts_count = len(accounts_data)
+        running_status = "Running" if config["running"] else "Stopped"
+        panel_text = (
+            f"✨ **Master Control Bot** ✨\n"
+            f"👤 **User Panel**\n"
+            f"📊 Accounts: {accounts_count} ({running_status})\n"
+            f"⏱️ Delay Cycle: {config['delay']}s\n"
+            f"💬 Message: {config['message'][:30]}..."
+        )
+        await message.reply_text(panel_text, reply_markup=get_main_keyboard())
+
+    elif text.startswith("/setmsg"):
+        new_msg = text.partition(" ")[2]
+        if not new_msg:
+            await message.reply_text("Please provide a message. Example: `/setmsg Hello World`")
+            return
+        config["message"] = new_msg
+        save_json(CONFIG_FILE, config)
+        await message.reply_text("✅ Broadcast message updated successfully!")
+
+    elif text.startswith("/setdelay"):
+        try:
+            delay_val = int(text.partition(" ")[2])
+            config["delay"] = delay_val
+            save_json(CONFIG_FILE, config)
+            await message.reply_text(f"✅ Delay updated to {delay_val} seconds!")
+        except ValueError:
+            await message.reply_text("Invalid format. Use `/setdelay 60`")
+
+    elif text.startswith("/addsession"):
+        parts = text.split(" ", 1)
+        if len(parts) < 2:
+            await message.reply_text("Usage: `/addsession [string_session]`")
+            return
+        session_str = parts[1].strip()
+        try:
+            temp_client = Client(name="temp_sess", api_id=API_ID, api_hash=API_HASH, session_string=session_str)
+            await temp_client.start()
+            me = await temp_client.get_me()
+            await temp_client.stop()
+            
+            accounts_data[session_str] = {"phone": getattr(me, "phone_number", "Unknown")}
+            save_json(ACCOUNTS_FILE, accounts_data)
+            await message.reply_text(f"✅ Account added successfully for: {me.first_name} ({getattr(me, 'phone_number', '')})")
+        except Exception as e:
+            await message.reply_text(f"❌ Failed to login: {str(e)}")
 
 @bot.on_callback_query()
 async def callback_handler(client, callback_query: CallbackQuery):
-    if not await check_admin(callback_query):
+    user_id = callback_query.from_user.id if callback_query.from_user else 0
+    if ADMIN_ID != 0 and user_id != ADMIN_ID:
         await callback_query.answer("❌ Access Denied! Owner se access lein.", show_alert=True)
         return
 
@@ -156,7 +220,7 @@ async def callback_handler(client, callback_query: CallbackQuery):
 async def update_panel(message: Message):
     accounts_count = len(accounts_data)
     running_status = "Running" if config["running"] else "Stopped"
-    text = (
+    panel_text = (
         f"✨ **Master Control Bot** ✨\n"
         f"👤 **User Panel**\n"
         f"📊 Accounts: {accounts_count} ({running_status})\n"
@@ -164,54 +228,9 @@ async def update_panel(message: Message):
         f"💬 Message: {config['message'][:30]}..."
     )
     try:
-        await message.edit_text(text, reply_markup=get_main_keyboard())
+        await message.edit_text(panel_text, reply_markup=get_main_keyboard())
     except Exception:
         pass
-
-@bot.on_message(filters.command("setmsg"))
-async def set_message_cmd(client, message: Message):
-    if not await check_admin(message):
-        return
-    new_msg = message.text.partition(" ")[2]
-    if not new_msg:
-        await message.reply_text("Please provide a message. Example: `/setmsg Hello World`")
-        return
-    config["message"] = new_msg
-    save_json(CONFIG_FILE, config)
-    await message.reply_text("✅ Broadcast message updated successfully!")
-
-@bot.on_message(filters.command("setdelay"))
-async def set_delay_cmd(client, message: Message):
-    if not await check_admin(message):
-        return
-    try:
-        delay_val = int(message.text.partition(" ")[2])
-        config["delay"] = delay_val
-        save_json(CONFIG_FILE, config)
-        await message.reply_text(f"✅ Delay updated to {delay_val} seconds!")
-    except ValueError:
-        await message.reply_text("Invalid format. Use `/setdelay 60`")
-
-@bot.on_message(filters.command("addsession"))
-async def add_session_cmd(client, message: Message):
-    if not await check_admin(message):
-        return
-    parts = message.text.split(" ", 1)
-    if len(parts) < 2:
-        await message.reply_text("Usage: `/addsession [string_session]`")
-        return
-    session_str = parts[1].strip()
-    try:
-        temp_client = Client(name="temp_sess", api_id=API_ID, api_hash=API_HASH, session_string=session_str)
-        await temp_client.start()
-        me = await temp_client.get_me()
-        await temp_client.stop()
-        
-        accounts_data[session_str] = {"phone": getattr(me, "phone_number", "Unknown")}
-        save_json(ACCOUNTS_FILE, accounts_data)
-        await message.reply_text(f"✅ Account added successfully for: {me.first_name} ({getattr(me, 'phone_number', '')})")
-    except Exception as e:
-        await message.reply_text(f"❌ Failed to login: {str(e)}")
 
 async def run_broadcaster():
     while config["running"]:
@@ -235,10 +254,7 @@ async def run_broadcaster():
                             continue
                 await user_client.stop()
             except Exception as e:
-                print(f"Error with session: {e}")
+                logger.error(f"Error with session: {e}")
                 
         delay_time = config.get("delay", 60)
         await asyncio.sleep(delay_time)
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
